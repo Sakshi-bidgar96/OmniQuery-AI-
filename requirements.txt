@@ -1,0 +1,7 @@
+streamlit
+pypdf
+chromadb
+requests
+python-dotenv
+google-genai
+neo4j

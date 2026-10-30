@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime
 
 import time
+import secrets
+import hmac
 
 import streamlit as st
 import pypdf
@@ -31,6 +33,196 @@ st.set_page_config(
     page_icon="🧠",
     layout="wide",
 )
+
+
+# ============================================================
+# LOGIN AND SIGNUP SYSTEM
+# ============================================================
+
+AUTH_DB = "users.db"
+
+
+def init_auth_db():
+    with sqlite3.connect(AUTH_DB) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+
+def hash_password(password, salt):
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        bytes.fromhex(salt),
+        200000
+    ).hex()
+
+
+def register_user(username, password):
+    username = username.strip().lower()
+
+    if len(username) < 3:
+        return False, "Username must contain at least 3 characters."
+
+    if len(password) < 8:
+        return False, "Password must contain at least 8 characters."
+
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(password, salt)
+
+    try:
+        with sqlite3.connect(AUTH_DB) as conn:
+            conn.execute(
+                """INSERT INTO users
+                   (username, password_hash, salt, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (
+                    username,
+                    password_hash,
+                    salt,
+                    datetime.now().isoformat(timespec="seconds")
+                )
+            )
+
+        return True, "Account created successfully! Please login."
+
+    except sqlite3.IntegrityError:
+        return False, "This username already exists."
+
+
+def verify_user(username, password):
+    username = username.strip().lower()
+
+    with sqlite3.connect(AUTH_DB) as conn:
+        user = conn.execute(
+            """SELECT id, username, password_hash, salt
+               FROM users WHERE username = ?""",
+            (username,)
+        ).fetchone()
+
+    if not user:
+        return None
+
+    user_id, saved_username, saved_hash, salt = user
+    entered_hash = hash_password(password, salt)
+
+    if hmac.compare_digest(entered_hash, saved_hash):
+        return {
+            "id": user_id,
+            "username": saved_username
+        }
+
+    return None
+
+
+# Initialize authentication database
+init_auth_db()
+
+
+# Initialize login state
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+
+    st.markdown(
+        "<h1 style='text-align:center;'>✨ OmniQuery AI</h1>",
+        unsafe_allow_html=True
+    )
+
+    st.markdown(
+        "<p style='text-align:center;'>"
+        "Your Intelligent AI Knowledge Assistant"
+        "</p>",
+        unsafe_allow_html=True
+    )
+
+    login_tab, signup_tab = st.tabs(
+        ["🔐 Login", "📝 Sign Up"]
+    )
+
+    with login_tab:
+
+        with st.form("login_form"):
+
+            st.subheader("Welcome Back!")
+
+            login_username = st.text_input("Username")
+            login_password = st.text_input(
+                "Password",
+                type="password"
+            )
+
+            login_button = st.form_submit_button(
+                "Login",
+                use_container_width=True
+            )
+
+            if login_button:
+
+                user = verify_user(
+                    login_username,
+                    login_password
+                )
+
+                if user:
+                    st.session_state.authenticated = True
+                    st.session_state.user_id = user["id"]
+                    st.session_state.username = user["username"]
+
+                    st.success("Login successful!")
+                    st.rerun()
+
+                else:
+                    st.error("Invalid username or password.")
+
+    with signup_tab:
+
+        with st.form("signup_form"):
+
+            st.subheader("Create New Account")
+
+            new_username = st.text_input("Choose Username")
+
+            new_password = st.text_input(
+                "Create Password",
+                type="password"
+            )
+
+            confirm_password = st.text_input(
+                "Confirm Password",
+                type="password"
+            )
+
+            signup_button = st.form_submit_button(
+                "Create Account",
+                use_container_width=True
+            )
+
+            if signup_button:
+
+                if new_password != confirm_password:
+                    st.error("Passwords do not match.")
+
+                else:
+                    success, message = register_user(
+                        new_username,
+                        new_password
+                    )
+
+                    if success:
+                        st.success(message)
+                    else:
+                        st.error(message)
+
+    st.stop()
+
 
 st.title("🧠 Graph RAG AI Knowledge Assistant")
 st.caption(
@@ -126,15 +318,15 @@ def load_chat_history(session_id):
     ]
 
 
-def list_chat_sessions():
+def list_chat_sessions(user_id):
     with sqlite3.connect(DB_PATH) as conn:
         return conn.execute("""
             SELECT session_id, MIN(id), MIN(created_at)
             FROM chat_history
+            WHERE session_id LIKE ?
             GROUP BY session_id
             ORDER BY MIN(id) DESC
-        """).fetchall()
-
+        """, (f"user-{user_id}-%",)).fetchall()
 
 def clear_chat_session(session_id):
     with sqlite3.connect(DB_PATH) as conn:
@@ -146,24 +338,28 @@ def clear_chat_session(session_id):
 
 init_chat_history_db()
 
+
+# Initialize Session ID
 if "session_id" not in st.session_state:
     st.session_state.session_id = (
-        "chat-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+        f"user-{st.session_state.user_id}-chat-"
+        + datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     )
 
+
+# Initialize Chat History
 if "messages" not in st.session_state:
     st.session_state.messages = load_chat_history(
         st.session_state.session_id
     )
 
-# Initialize chat history
-if "messages" not in st.session_state:
-    st.session_state.messages = []
 
 # Clear Chat button
 if st.button("🗑️ Clear Chat", use_container_width=True):
+    clear_chat_session(st.session_state.session_id)
     st.session_state.messages = []
     st.rerun()
+
 # ============================================================
 # CHROMADB
 # ============================================================
@@ -694,6 +890,17 @@ def generate_ai_image(prompt):
 # ============================================================
 
 with st.sidebar:
+    
+    st.write(f"👤 Welcome, {st.session_state.username}")
+
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state.authenticated = False
+        st.session_state.pop("user_id", None)
+        st.session_state.pop("username", None)
+        st.session_state.pop("session_id", None)
+        st.session_state.pop("messages", None)
+        st.rerun()
+
     st.header("⚙️ Settings")
 
     mode = st.radio(
@@ -736,7 +943,7 @@ with st.sidebar:
         st.session_state.messages = []
         st.rerun()
 
-    sessions = list_chat_sessions()
+    sessions = list_chat_sessions(st.session_state.user_id)
 
     if sessions:
         session_options = [row[0] for row in sessions]
